@@ -1,7 +1,7 @@
-import { synthesizePracticeClip } from "./demo.js";
-import { buildPeaks } from "./peaks.js";
 import { summarizePitch } from "./pitch.js";
 import { createTimeline } from "./view.js";
+
+const SAMPLE_FILE = "秒針を噛む   feat.尤里 - 人声.mp3";
 
 const $ = (id) => document.getElementById(id);
 
@@ -18,8 +18,6 @@ const demoBtn = $("demo");
 const playBtn = $("play");
 const followBtn = $("follow");
 const fitBtn = $("fit");
-const vocalBtn = $("mode-vocal");
-const originalBtn = $("mode-original");
 const volumeInput = $("volume");
 const titleEl = $("track-title");
 const statsEl = $("stats");
@@ -39,9 +37,7 @@ const state = {
   channels: 0,
   duration: 0,
   sampleRate: 0,
-  original: null,
-  vocal: null,
-  mode: "vocal",
+  audio: null,
   position: 0,
   playing: false,
   startedAt: 0,
@@ -75,17 +71,11 @@ function formatClock(sec, precise = false) {
   return `${m}:${String(Math.floor(s)).padStart(2, "0")}`;
 }
 
-function stageText(stage) {
-  if (stage === "decode") return "正在解码音频";
-  if (stage === "pitch") return "正在分析音高与颤音";
-  return "正在分离人声";
-}
-
-function showProgress(ratio, stage) {
+function showProgress(ratio) {
   progressEl.hidden = false;
   const pct = Math.max(0, Math.min(100, Math.round(ratio * 100)));
   progressFill.style.width = `${pct}%`;
-  progressLabel.textContent = `${stageText(stage)} ${pct}%`;
+  progressLabel.textContent = ratio < 0.08 ? `正在解码音频 ${pct}%` : `正在画出音高线 ${pct}%`;
 }
 
 function fail(message) {
@@ -96,12 +86,10 @@ function fail(message) {
 function setBusy(busy) {
   openBtn.disabled = busy;
   demoBtn.disabled = busy;
-  const ready = !busy && !!state.vocal;
+  const ready = !busy && !!state.audio;
   playBtn.disabled = !ready;
   followBtn.disabled = !ready;
   fitBtn.disabled = !ready;
-  vocalBtn.disabled = !ready;
-  originalBtn.disabled = !ready;
   appEl.dataset.busy = busy ? "true" : "false";
 }
 
@@ -109,11 +97,6 @@ function syncFollow() {
   const on = view.getFollow();
   followBtn.classList.toggle("on", on);
   followBtn.setAttribute("aria-pressed", on ? "true" : "false");
-}
-
-function syncMode() {
-  vocalBtn.classList.toggle("on", state.mode === "vocal");
-  originalBtn.classList.toggle("on", state.mode === "original");
 }
 
 function renderClock(time) {
@@ -180,7 +163,7 @@ function halt(at) {
   state.position = Math.max(0, Math.min(state.duration || 0, at));
   playBtn.textContent = "播放";
   playBtn.setAttribute("aria-pressed", "false");
-  if (state.vocal) {
+  if (state.audio) {
     view.setPlayhead(state.position, { follow: false });
     renderClock(state.position);
     if (!hovering) renderReadout(view.describe(state.position));
@@ -201,16 +184,15 @@ function tick() {
 }
 
 async function play() {
-  if (!state.vocal) return;
+  if (!state.audio) return;
   const gen = ++playGen;
   const ctx = audio();
   await ctx.resume();
-  if (gen !== playGen || !state.vocal) return;
+  if (gen !== playGen || !state.audio) return;
   if (state.position >= state.duration - 0.05) state.position = 0;
   stopSource();
-  const buffer = state.mode === "original" ? state.original : state.vocal;
   const source = ctx.createBufferSource();
-  source.buffer = buffer;
+  source.buffer = state.audio;
   source.connect(gainNode);
   source.onended = () => {
     if (state.source !== source) return;
@@ -237,18 +219,6 @@ function seek(time) {
   if (wasPlaying) play();
 }
 
-function setMode(mode) {
-  if (state.mode === mode) return;
-  const wasPlaying = state.playing;
-  const time = currentTime();
-  state.mode = mode;
-  syncMode();
-  if (wasPlaying) {
-    halt(time);
-    play();
-  }
-}
-
 function ensureWorker() {
   if (worker) return worker;
   worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
@@ -267,7 +237,7 @@ function cancelWorker() {
   }
 }
 
-function processAudio(left, right, sampleRate, token) {
+function processAudio(samples, sampleRate, token) {
   cancelWorker();
   const current = ensureWorker();
   return new Promise((resolve, reject) => {
@@ -280,7 +250,7 @@ function processAudio(left, right, sampleRate, token) {
     const onMessage = (event) => {
       if (!event.data || event.data.id !== token) return;
       if (event.data.type === "progress") {
-        if (token === runToken) showProgress(event.data.ratio, event.data.stage);
+        if (token === runToken) showProgress(0.08 + event.data.ratio * 0.92);
         return;
       }
       if (event.data.type === "done") finish(resolve, event.data);
@@ -290,58 +260,57 @@ function processAudio(left, right, sampleRate, token) {
     current.addEventListener("error", () => {
       finish(reject, new Error("分析线程中断了"));
     }, { once: true });
-    const transfer = [left.buffer];
-    if (right) transfer.push(right.buffer);
-    current.postMessage({ id: token, sampleRate, left, right: right || null }, transfer);
+    current.postMessage({ id: token, sampleRate, samples }, [samples.buffer]);
   });
 }
 
-function renderLoaded(summary, mono) {
+function monoMix(decoded) {
+  const n = decoded.length;
+  const channels = decoded.numberOfChannels;
+  const out = new Float32Array(n);
+  for (let c = 0; c < channels; c++) {
+    const data = decoded.getChannelData(c);
+    for (let i = 0; i < n; i++) out[i] += data[i];
+  }
+  if (channels > 1) {
+    for (let i = 0; i < n; i++) out[i] /= channels;
+  }
+  return out;
+}
+
+function renderLoaded(summary) {
   const khz = (state.sampleRate / 1000).toFixed(1).replace(/\.0$/, "");
   titleEl.textContent = `${state.name} · ${khz} kHz · ${state.channels > 1 ? "立体声" : "单声道"} · ${formatClock(state.duration)}`;
   if (!summary.low || !summary.high) {
-    statsEl.textContent = mono
-      ? "没有检出稳定音高。单声道素材只能减弱打击乐，人声和伴奏仍叠在一起。"
-      : "没有检出稳定音高。可以换一段更清晰的人声再试。";
+    statsEl.textContent = "没有检出稳定音高。换一段更清晰的人声再试。";
     return;
   }
-  const vib = summary.medianRate
-    ? `颤音 ${summary.medianRate.toFixed(1)} Hz / ±${Math.round(summary.medianDepth)} 音分，覆盖 ${Math.round(summary.vibratoRatio * 100)}% 有声段`
-    : "没有检出明显颤音";
-  const note = mono
-    ? "这是单声道，只能减弱打击乐。"
-    : "波形和音高曲线都来自提取后的人声。";
-  statsEl.textContent = `音域 ${summary.low.name}–${summary.high.name} · ${vib}。${note}`;
+  const voiced = `有声 ${Math.round(summary.voicedRatio * 100)}%`;
+  const vib = summary.vibratoRatio > 0.08 && summary.medianRate
+    ? ` · 颤音 ${summary.medianRate.toFixed(1)} Hz / ±${Math.round(summary.medianDepth)} 音分`
+    : "";
+  statsEl.textContent = `音域 ${summary.low.name}–${summary.high.name} · ${voiced}${vib}`;
 }
 
-async function analyze(token, { name, sampleRate, left, right, original, channels }) {
+async function analyze(token, { name, sampleRate, samples, buffer, channels }) {
   if (state.playing) halt(0);
   errorEl.hidden = true;
-  showProgress(0.02, "separate");
-  const result = await processAudio(left, right, sampleRate, token);
+  showProgress(0.08);
+  const result = await processAudio(samples, sampleRate, token);
   if (token !== runToken) return;
-  const ctx = audio();
-  const vocalBuffer = ctx.createBuffer(1, result.vocal.length, sampleRate);
-  vocalBuffer.getChannelData(0).set(result.vocal);
   state.name = name;
   state.sampleRate = sampleRate;
   state.channels = channels;
-  state.original = original;
-  state.vocal = vocalBuffer;
-  state.duration = original.duration;
+  state.audio = buffer;
+  state.duration = buffer.duration;
   state.position = 0;
-  state.mode = "vocal";
-  syncMode();
-  const peaks = buildPeaks(result.vocal);
   emptyEl.hidden = true;
   workspaceEl.hidden = false;
   view.setData({
-    peaks,
     pitch: result.pitch,
-    sampleRate,
     duration: state.duration,
   });
-  renderLoaded(summarizePitch(result.pitch), channels < 2);
+  renderLoaded(summarizePitch(result.pitch));
   renderClock(0);
   renderWindow();
   renderReadout(view.describe(0));
@@ -354,20 +323,17 @@ async function loadFile(file) {
   errorEl.hidden = true;
   try {
     if (state.playing) halt(0);
-    showProgress(0.01, "decode");
+    showProgress(0.01);
     const ctx = audio();
     const decoded = await ctx.decodeAudioData(await file.arrayBuffer());
     if (token !== runToken) return;
-    if (decoded.duration > 12 * 60) throw new Error("超过 12 分钟了，请先截出要练的片段。");
+    if (decoded.duration > 12 * 60) throw new Error("超过 12 分钟了，请先截出要看的片段。");
     if (decoded.length < 2048) throw new Error("这段音频太短，听不出音高。");
-    const left = decoded.getChannelData(0).slice();
-    const right = decoded.numberOfChannels > 1 ? decoded.getChannelData(1).slice() : null;
     await analyze(token, {
-      name: file.name.replace(/\.[^.]+$/, ""),
+      name: file.name.replace(/\.[^.]+$/, "").replace(/\s+/g, " ").trim(),
       sampleRate: decoded.sampleRate,
-      left,
-      right,
-      original: decoded,
+      samples: monoMix(decoded),
+      buffer: decoded,
       channels: decoded.numberOfChannels,
     });
   } catch (error) {
@@ -380,33 +346,22 @@ async function loadFile(file) {
   }
 }
 
-async function loadDemo() {
-  const token = ++runToken;
+async function loadSample() {
+  const token = runToken;
   setBusy(true);
   errorEl.hidden = true;
   try {
-    showProgress(0.01, "decode");
-    const ctx = audio();
-    const clip = synthesizePracticeClip(44100, { drums: true });
+    showProgress(0.01);
+    const url = new URL(`../${SAMPLE_FILE}`, import.meta.url);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error("示例人声没有载入。");
     if (token !== runToken) return;
-    const original = ctx.createBuffer(2, clip.left.length, clip.sampleRate);
-    original.getChannelData(0).set(clip.left);
-    original.getChannelData(1).set(clip.right);
-    await analyze(token, {
-      name: "示例：居中人声与伴奏",
-      sampleRate: clip.sampleRate,
-      left: clip.left,
-      right: clip.right,
-      original,
-      channels: 2,
-    });
+    const blob = await response.blob();
+    if (token !== runToken) return;
+    await loadFile(new File([blob], SAMPLE_FILE, { type: blob.type || "audio/mpeg" }));
   } catch (error) {
-    if (token === runToken && error.name !== "AbortError") fail(error.message || "示例生成失败。");
-  } finally {
-    if (token === runToken) {
-      progressEl.hidden = true;
-      setBusy(false);
-    }
+    if (token === runToken && error.name !== "AbortError") fail(error.message || "示例人声没有载入。");
+    if (token === runToken) setBusy(false);
   }
 }
 
@@ -416,7 +371,7 @@ view.onHover((info) => {
   renderReadout(info || view.describe(currentTime()));
 });
 view.onChange(() => {
-  if (state.vocal) renderWindow();
+  if (state.audio) renderWindow();
 });
 
 openBtn.addEventListener("click", () => fileInput.click());
@@ -425,7 +380,7 @@ fileInput.addEventListener("change", () => {
   fileInput.value = "";
   if (file) loadFile(file);
 });
-demoBtn.addEventListener("click", () => loadDemo());
+demoBtn.addEventListener("click", () => loadSample());
 playBtn.addEventListener("click", () => togglePlay());
 fitBtn.addEventListener("click", () => view.fit());
 followBtn.addEventListener("click", () => {
@@ -433,8 +388,6 @@ followBtn.addEventListener("click", () => {
   syncFollow();
   if (view.getFollow()) view.setPlayhead(currentTime(), { follow: true });
 });
-vocalBtn.addEventListener("click", () => setMode("vocal"));
-originalBtn.addEventListener("click", () => setMode("original"));
 volumeInput.addEventListener("input", () => {
   if (gainNode) gainNode.gain.value = Number(volumeInput.value);
 });
@@ -464,23 +417,23 @@ window.addEventListener("keydown", (event) => {
   if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
   if (event.code === "Space") {
     event.preventDefault();
-    if (state.vocal) togglePlay();
+    if (state.audio) togglePlay();
   } else if (event.code === "ArrowLeft") {
     event.preventDefault();
-    if (!state.vocal) return;
+    if (!state.audio) return;
     if (event.shiftKey) view.panBy(-(view.getView().end - view.getView().start) * 0.2);
     else seek(currentTime() - 1);
   } else if (event.code === "ArrowRight") {
     event.preventDefault();
-    if (!state.vocal) return;
+    if (!state.audio) return;
     if (event.shiftKey) view.panBy((view.getView().end - view.getView().start) * 0.2);
     else seek(currentTime() + 1);
   } else if (event.code === "Home") {
     event.preventDefault();
-    if (state.vocal) seek(0);
+    if (state.audio) seek(0);
   }
 });
 
 setBusy(false);
-syncMode();
 syncFollow();
+loadSample();

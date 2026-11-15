@@ -10,21 +10,16 @@ function clamp(value, lo, hi) {
 function layoutOf(width, height) {
   const gutter = width < 560 ? 46 : 58;
   const axis = 22;
-  const gap = 8;
   const plotW = Math.max(1, width - gutter);
-  const lanes = Math.max(1, height - axis);
-  const waveH = Math.round(clamp(lanes * 0.28, 64, 128));
-  const pitchY = waveH + gap;
+  const pitchH = Math.max(48, height - axis);
   return {
     gutter,
     width,
     height,
     plotX: gutter,
     plotW,
-    waveY: 0,
-    waveH,
-    pitchY,
-    pitchH: Math.max(48, lanes - pitchY),
+    pitchY: 0,
+    pitchH,
     axisY: height - axis,
     axisH: axis,
   };
@@ -78,14 +73,6 @@ function colorForHz(hz) {
   if (cents <= 18) return "#b7d98a";
   if (cents <= 40) return "#e2b15a";
   return "#e57a55";
-}
-
-function chooseLevel(peaks, samplesPerPixel) {
-  let best = peaks.levels[0];
-  for (const level of peaks.levels) {
-    if (level.bucket <= samplesPerPixel * 1.35) best = level;
-  }
-  return best;
 }
 
 function formatTick(sec) {
@@ -152,15 +139,11 @@ export function createTimeline(mainCanvas, overviewCanvas) {
     ctx.fillRect(0, 0, width, height);
     ctx.fillStyle = "#0c0d0a";
     ctx.fillRect(0, 0, box.gutter, height);
-    ctx.fillStyle = "#161910";
-    ctx.fillRect(box.plotX, box.waveY, box.plotW, box.waveH);
     ctx.fillStyle = "#12150f";
     ctx.fillRect(box.plotX, box.pitchY, box.plotW, box.pitchH);
 
     drawGrid(ctx, box);
-    drawWave(ctx, box);
     drawPitch(ctx, box);
-    drawLabels(ctx, box);
     drawPlayhead(ctx, box);
     if (hoverTime != null && !drag) drawHover(ctx, box, hoverTime);
     drawAxis(ctx, box);
@@ -186,7 +169,7 @@ export function createTimeline(mainCanvas, overviewCanvas) {
     const first = Math.ceil(viewStart / step) * step;
     for (let t = first; t < viewEnd; t += step) {
       const x = box.plotX + ((t - viewStart) / span) * box.plotW;
-      ctx.moveTo(x, box.waveY);
+      ctx.moveTo(x, box.pitchY);
       ctx.lineTo(x, box.pitchY + box.pitchH);
     }
     ctx.stroke();
@@ -210,48 +193,6 @@ export function createTimeline(mainCanvas, overviewCanvas) {
         ctx.fillText(note.name, box.gutter - 8, y);
       }
     }
-    ctx.restore();
-  }
-
-  function drawWave(ctx, box) {
-    const { peaks, sampleRate } = data;
-    if (!peaks || !peaks.length) return;
-    const span = viewEnd - viewStart;
-    const samplesPerPixel = (span * sampleRate) / box.plotW;
-    const level = chooseLevel(peaks, samplesPerPixel);
-    const mid = box.waveY + box.waveH / 2;
-    const amp = (box.waveH / 2) * 0.82;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(box.plotX, box.waveY, box.plotW, box.waveH);
-    ctx.clip();
-    ctx.strokeStyle = "rgba(183, 201, 164, 0.9)";
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let px = 0; px < box.plotW; px++) {
-      const s0 = ((viewStart + (px / box.plotW) * span) * sampleRate);
-      const s1 = ((viewStart + ((px + 1) / box.plotW) * span) * sampleRate);
-      let b0 = Math.floor(s0 / level.bucket);
-      let b1 = Math.ceil(s1 / level.bucket);
-      b0 = clamp(b0, 0, level.min.length - 1);
-      b1 = clamp(Math.max(b1, b0 + 1), 0, level.min.length);
-      let lo = Infinity;
-      let hi = -Infinity;
-      for (let b = b0; b < b1; b++) {
-        if (level.min[b] < lo) lo = level.min[b];
-        if (level.max[b] > hi) hi = level.max[b];
-      }
-      if (lo === Infinity) continue;
-      const x = box.plotX + px + 0.5;
-      ctx.moveTo(x, mid - hi * amp);
-      ctx.lineTo(x, mid - lo * amp);
-    }
-    ctx.stroke();
-    ctx.strokeStyle = "rgba(239, 231, 210, 0.16)";
-    ctx.beginPath();
-    ctx.moveTo(box.plotX, mid);
-    ctx.lineTo(box.plotX + box.plotW, mid);
-    ctx.stroke();
     ctx.restore();
   }
 
@@ -400,17 +341,6 @@ export function createTimeline(mainCanvas, overviewCanvas) {
     flush();
   }
 
-  function drawLabels(ctx, box) {
-    ctx.save();
-    ctx.font = "11px ui-sans-serif, sans-serif";
-    ctx.fillStyle = "rgba(239, 231, 210, 0.45)";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "top";
-    ctx.fillText("波形", box.plotX + 8, box.waveY + 6);
-    ctx.fillText("音高", box.plotX + 8, box.pitchY + 6);
-    ctx.restore();
-  }
-
   function drawPlayhead(ctx, box) {
     if (playhead < viewStart || playhead > viewEnd) return;
     const x = xAtTime(playhead, box, viewEnd - viewStart);
@@ -444,7 +374,7 @@ export function createTimeline(mainCanvas, overviewCanvas) {
     ctx.strokeStyle = "rgba(226, 177, 90, 0.8)";
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
-    ctx.moveTo(x, box.waveY);
+    ctx.moveTo(x, box.pitchY);
     ctx.lineTo(x, box.pitchY + box.pitchH);
     ctx.stroke();
     ctx.setLineDash([]);
@@ -476,30 +406,32 @@ export function createTimeline(mainCanvas, overviewCanvas) {
     ctx.clearRect(0, 0, width, height);
     ctx.fillStyle = "#14170f";
     ctx.fillRect(0, 0, width, height);
-    const { peaks } = data;
-    if (peaks && peaks.levels.length) {
-      const level = peaks.levels[peaks.levels.length - 1];
-      const mid = height / 2;
-      const amp = height * 0.36;
-      ctx.strokeStyle = "rgba(183, 201, 164, 0.75)";
-      ctx.lineWidth = 1;
+    const duration = data.duration || 1;
+    const pitch = data.pitch;
+    if (pitch && pitch.f0.length && range.max > range.min) {
+      const frameDur = pitch.hop / pitch.rate;
+      const center = pitch.window / 2 / pitch.rate;
+      const logMin = Math.log(range.min);
+      const logSpan = Math.log(range.max) - logMin;
+      const step = Math.max(1, Math.floor(pitch.f0.length / Math.max(1, width * 2)));
+      ctx.strokeStyle = "rgba(226, 177, 90, 0.9)";
+      ctx.lineWidth = 1.4;
       ctx.beginPath();
-      for (let x = 0; x < width; x++) {
-        const b0 = Math.floor((x / width) * level.min.length);
-        const b1 = Math.max(b0 + 1, Math.ceil(((x + 1) / width) * level.min.length));
-        let lo = Infinity;
-        let hi = -Infinity;
-        for (let b = b0; b < Math.min(level.min.length, b1); b++) {
-          if (level.min[b] < lo) lo = level.min[b];
-          if (level.max[b] > hi) hi = level.max[b];
+      let drawing = false;
+      for (let i = 0; i < pitch.f0.length; i += step) {
+        const hz = pitch.f0[i];
+        if (hz <= 0) {
+          drawing = false;
+          continue;
         }
-        if (lo === Infinity) continue;
-        ctx.moveTo(x + 0.5, mid - hi * amp);
-        ctx.lineTo(x + 0.5, mid - lo * amp);
+        const x = ((i * frameDur + center) / duration) * width;
+        const y = height - ((Math.log(hz) - logMin) / logSpan) * (height - 8) - 4;
+        if (!drawing) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+        drawing = true;
       }
       ctx.stroke();
     }
-    const duration = data.duration || 1;
     const x0 = (viewStart / duration) * width;
     const x1 = (viewEnd / duration) * width;
     ctx.fillStyle = "rgba(226, 177, 90, 0.16)";

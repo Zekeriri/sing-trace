@@ -7,9 +7,9 @@ import { describeHz } from "./notes.js";
 
 const WINDOW = 1024;
 const HOP = 160;
-const F_MIN = 75;
-const F_MAX = 1100;
-const YIN_THRESHOLD = 0.15;
+const F_MIN = 70;
+const F_MAX = 800;
+const YIN_THRESHOLD = 0.45;
 
 function hann(n) {
   const w = new Float64Array(n);
@@ -17,11 +17,89 @@ function hann(n) {
   return w;
 }
 
+function refineDip(cm, tau) {
+  const s0 = cm[tau - 1];
+  const s1 = cm[tau];
+  const s2 = cm[tau + 1];
+  const denom = 2 * (s0 - 2 * s1 + s2);
+  if (Math.abs(denom) < 1e-12) return tau;
+  const delta = (s0 - s2) / denom;
+  if (delta < -1 || delta > 1) return tau;
+  return tau + delta;
+}
+
+function collectCandidates(cm, sampleRate, tauMin, tauMax) {
+  const found = [];
+  for (let tau = tauMin; tau <= tauMax; tau++) {
+    if (cm[tau] > YIN_THRESHOLD) continue;
+    if (!(cm[tau] <= cm[tau - 1] && cm[tau] <= cm[tau + 1])) continue;
+    const refined = refineDip(cm, tau);
+    const hz = sampleRate / refined;
+    if (hz < F_MIN || hz > F_MAX) continue;
+    found.push({ hz, cm: cm[tau] });
+  }
+  found.sort((a, b) => a.cm - b.cm);
+  return found.slice(0, 4);
+}
+
+function transitionCost(prev, next) {
+  if (!prev || !next) return 0.02;
+  const cents = Math.abs(1200 * Math.log2(next / prev));
+  if (cents < 150) return cents / 700;
+  if (cents < 800) return 0.1;
+  if (Math.abs(cents - 1200) < 90) return 0.85;
+  if (Math.abs(cents - 2400) < 90) return 1.2;
+  return 0.4;
+}
+
+function decodeContour(frames) {
+  const n = frames.length;
+  const score = new Array(n);
+  const back = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const cands = frames[i].length ? frames[i] : [{ hz: 0, cm: 0.2 }];
+    score[i] = new Float64Array(cands.length);
+    back[i] = new Int16Array(cands.length);
+    for (let j = 0; j < cands.length; j++) {
+      const local = cands[j].hz ? cands[j].cm : 0.08;
+      if (i === 0) {
+        score[i][j] = local;
+        back[i][j] = -1;
+        continue;
+      }
+      const prevCands = frames[i - 1].length ? frames[i - 1] : [{ hz: 0, cm: 0.2 }];
+      let best = Infinity;
+      let arg = 0;
+      for (let k = 0; k < prevCands.length; k++) {
+        const cost = score[i - 1][k] + transitionCost(prevCands[k].hz, cands[j].hz);
+        if (cost < best) {
+          best = cost;
+          arg = k;
+        }
+      }
+      score[i][j] = best + local;
+      back[i][j] = arg;
+    }
+  }
+  const f0 = new Float32Array(n);
+  if (!n) return f0;
+  const last = frames[n - 1].length ? frames[n - 1] : [{ hz: 0 }];
+  let arg = 0;
+  for (let j = 1; j < last.length; j++) if (score[n - 1][j] < score[n - 1][arg]) arg = j;
+  for (let i = n - 1; i >= 0; i--) {
+    const cands = frames[i].length ? frames[i] : [{ hz: 0 }];
+    f0[i] = cands[arg].hz;
+    arg = back[i][arg];
+    if (arg < 0) break;
+  }
+  return f0;
+}
+
 function trackRaw(samples, sampleRate, onProgress) {
   const frames = Math.max(0, Math.floor((samples.length - WINDOW) / HOP));
-  const f0 = new Float32Array(frames);
   const rms = new Float32Array(frames);
-  if (!frames) return { f0, rms };
+  const cands = new Array(frames);
+  if (!frames) return { f0: new Float32Array(0), rms };
 
   const nfft = 2048;
   const win = hann(WINDOW);
@@ -49,6 +127,7 @@ function trackRaw(samples, sampleRate, onProgress) {
     const energy = prefix[WINDOW];
     rms[i] = Math.sqrt(energy / WINDOW);
     if (energy < 1e-8) {
+      cands[i] = [];
       if (onProgress && i % 250 === 0) onProgress(i / frames);
       continue;
     }
@@ -58,34 +137,17 @@ function trackRaw(samples, sampleRate, onProgress) {
       im[k] = 0;
     }
     ifft(re, im);
-
     cm[0] = 1;
     let running = 0;
-    let crossed = -1;
     for (let tau = 1; tau <= tauMax; tau++) {
       const d = Math.max(0, prefix[WINDOW - tau] + (prefix[WINDOW] - prefix[tau]) - 2 * re[tau]);
       running += d;
       cm[tau] = running > 0 ? (d * tau) / running : 1;
-      if (crossed < 0 && tau >= tauMin && cm[tau] < YIN_THRESHOLD) crossed = tau;
     }
-    if (crossed > 0) {
-      let tau = crossed;
-      while (tau < tauMax && cm[tau + 1] < cm[tau]) tau++;
-      const s0 = cm[tau - 1];
-      const s1 = cm[tau];
-      const s2 = cm[tau + 1];
-      const denom = 2 * (s0 - 2 * s1 + s2);
-      let refined = tau;
-      if (Math.abs(denom) > 1e-12) {
-        const delta = (s0 - s2) / denom;
-        if (delta >= -1 && delta <= 1) refined = tau + delta;
-      }
-      const hz = sampleRate / refined;
-      if (hz >= F_MIN && hz <= F_MAX && cm[tau] < YIN_THRESHOLD) f0[i] = hz;
-    }
+    cands[i] = collectCandidates(cm, sampleRate, tauMin, tauMax);
     if (onProgress && i % 250 === 0) onProgress(i / frames);
   }
-  return { f0, rms };
+  return { f0: decodeContour(cands), rms };
 }
 
 function gateByEnergy(f0, rms) {
@@ -125,6 +187,34 @@ function fixOctaves(f0) {
     vals.sort((a, b) => a - b);
     const med = Math.exp(vals[vals.length >> 1]);
     if (Math.abs(1200 * Math.log2(f0[i] / med)) > 150) out[i] = med;
+  }
+  return out;
+}
+
+function foldOctaves(f0) {
+  const out = Float32Array.from(f0);
+  const radius = 14;
+  for (let i = 0; i < out.length; i++) {
+    if (out[i] <= 0) continue;
+    const vals = [];
+    for (let k = i - radius; k <= i + radius; k++) {
+      if (k >= 0 && k < out.length && out[k] > 0) vals.push(Math.log(out[k]));
+    }
+    if (vals.length < 7) continue;
+    vals.sort((a, b) => a - b);
+    const med = Math.exp(vals[vals.length >> 1]);
+    let best = out[i];
+    let bestDist = Math.abs(1200 * Math.log2(best / med));
+    for (const factor of [0.5, 2]) {
+      const cand = out[i] * factor;
+      if (cand < F_MIN || cand > F_MAX) continue;
+      const dist = Math.abs(1200 * Math.log2(cand / med));
+      if (dist + 50 < bestDist) {
+        best = cand;
+        bestDist = dist;
+      }
+    }
+    out[i] = best;
   }
   return out;
 }
@@ -248,12 +338,40 @@ function solidifyVibrato(vib, frameSec) {
   }
 }
 
+function fillShortGaps(f0) {
+  const out = Float32Array.from(f0);
+  let i = 0;
+  while (i < out.length) {
+    if (out[i] > 0) {
+      i++;
+      continue;
+    }
+    let j = i;
+    while (j < out.length && out[j] <= 0) j++;
+    const gap = j - i;
+    if (i > 0 && j < out.length && gap <= 4) {
+      const left = out[i - 1];
+      const right = out[j];
+      if (Math.abs(1200 * Math.log2(right / left)) < 180) {
+        for (let k = i; k < j; k++) {
+          const t = (k - i + 1) / (gap + 1);
+          out[k] = left * (right / left) ** t;
+        }
+      }
+    }
+    i = j;
+  }
+  return out;
+}
+
 export function trackPitch(samples, sampleRate, onProgress) {
   const rate = sampleRate > 18000 ? 16000 : sampleRate;
   const x = rate === sampleRate ? samples : resampleTo(samples, sampleRate, rate);
   const raw = trackRaw(x, rate, onProgress);
   gateByEnergy(raw.f0, raw.rms);
-  let f0 = despike(raw.f0);
+  let f0 = fillShortGaps(raw.f0);
+  f0 = despike(f0);
+  f0 = foldOctaves(f0);
   f0 = fixOctaves(f0);
   f0 = despike(f0);
   const frameSec = HOP / rate;

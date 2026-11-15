@@ -29,6 +29,7 @@ jobs:
           mkdir -p _site
           cp index.html favicon.svg .nojekyll _site/
           cp -R css js _site/
+          cp -- *.mp3 _site/
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
