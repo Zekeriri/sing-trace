@@ -1,0 +1,8 @@
+{
+  "name": "sing-trace",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/dsp.test.mjs"
+  }
+}

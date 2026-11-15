@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0c0d0a" />
+    <title>Sing Trace · 练唱音高观测</title>
+    <meta
+      name="description"
+      content="在浏览器里分离人声，查看波形、音高曲线和颤音。音频不会上传。"
+    />
+    <link rel="icon" href="favicon.svg" />
+    <link rel="stylesheet" href="css/app.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="top">
+        <div class="brand">
+          <p class="eyebrow">声乐练习</p>
+          <h1>Sing Trace</h1>
+          <p class="lede">分离人声，把波形、音高和颤音放在同一条时间上。</p>
+        </div>
+        <div class="top-actions">
+          <button id="open" class="btn primary" type="button">打开音频</button>
+          <button id="demo" class="btn" type="button">载入示例</button>
+          <input id="file" type="file" accept="audio/*,.mp3,.wav,.flac,.ogg,.m4a,.aac,.webm" hidden />
+        </div>
+      </header>
+
+      <p id="error" class="error" hidden></p>
+
+      <section class="stage" id="stage">
+        <div class="empty" id="empty">
+          <svg class="empty-mark" viewBox="0 0 240 88" aria-hidden="true">
+            <path d="M4 58c18-28 28-28 40 0s22 28 40 0 22-28 40 0 28 28 40 0 22-20 36-8" />
+            <path class="pitch" d="M8 46c20-6 24 10 38 8 16-2 18-24 36-22 18 2 16 20 34 16 20-4 22-30 42-26 16 3 22 14 38 8" />
+          </svg>
+          <h2>把歌曲拖到这里</h2>
+          <p>也可以打开文件，或先听一段示例。分离和音高分析都在这台设备上完成，音频不会上传。</p>
+          <p class="fine">适合人声大致居中的立体声，或已经抽好的干声。mp3、wav、flac、ogg 都可以。</p>
+        </div>
+
+        <div class="workspace" id="workspace" hidden>
+          <div class="meta">
+            <h2 id="track-title">未载入</h2>
+            <p id="stats"></p>
+          </div>
+          <ul class="legend">
+            <li><i class="swatch wave"></i>波形</li>
+            <li><i class="swatch tune"></i>音准 ±18 音分</li>
+            <li><i class="swatch off"></i>偏离音高</li>
+            <li><i class="swatch vib"></i>颤音范围</li>
+          </ul>
+          <div class="canvas-wrap">
+            <canvas id="main" aria-label="人声波形与音高曲线"></canvas>
+          </div>
+          <div class="readout" id="readout">
+            <div><span class="k">时间</span><b id="rd-time">—</b></div>
+            <div><span class="k">音高</span><b id="rd-note">—</b></div>
+            <div><span class="k">偏差</span><b id="rd-cents">—</b></div>
+            <div><span class="k">频率</span><b id="rd-hz">—</b></div>
+            <div><span class="k">颤音</span><b id="rd-vib">—</b></div>
+            <div><span class="k">窗口</span><b id="rd-window">—</b></div>
+          </div>
+          <canvas id="overview" aria-label="整段总览，可拖动定位"></canvas>
+          <p class="hint">拖动波形平移，滚轮缩放，拖动下方总览定位。点击波形跳转播放。空格播放，左右方向键移动，按住 Shift 平移窗口。</p>
+        </div>
+
+        <div class="progress" id="progress" hidden>
+          <div class="progress-card">
+            <p id="progress-label">正在分离人声</p>
+            <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+              <span id="progress-fill"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="transport">
+        <button id="play" class="btn primary" type="button" disabled aria-pressed="false">播放</button>
+        <p class="time"><span id="cur">0:00</span><span class="dim"> / </span><span id="dur">0:00</span></p>
+        <div class="seg" role="group" aria-label="试听内容">
+          <button id="mode-vocal" class="on" type="button">人声</button>
+          <button id="mode-original" type="button">原声</button>
+        </div>
+        <label class="slider">音量
+          <input id="volume" type="range" min="0" max="1" step="0.01" value="0.86" />
+        </label>
+        <button id="follow" class="btn" type="button" disabled aria-pressed="true">跟随</button>
+        <button id="fit" class="btn" type="button" disabled>整段</button>
+      </footer>
+    </div>
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>
